@@ -1,224 +1,365 @@
-import React, { useEffect, useState, useRef } from 'react'
-import { ethers } from 'ethers'
-import { saveAs } from 'file-saver'
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ethers } from "ethers";
+import { saveAs } from "file-saver";
 
-// number formatting helper: fixed 4 decimals, no scientific notation
-const fmt = (v) => {
-  if (v === null || v === undefined || Number.isNaN(v)) return "-";
-  const n = typeof v === "number" ? v : Number(v);
-  return n.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
-};
-
+/*
+EVM Multi Wallet Tracker (Web) — Dark Mode + Polished UI
+- No Tailwind required; pure React + inline styles.
+- Dark mode toggle with localStorage persistence and system auto-detect.
+- Fixed-decimal number formatting (no scientific notation).
+- CSV export rounds to 4 decimals.
+*/
 
 const ERC20_ABI = [
-  'function decimals() view returns (uint8)',
-  'function symbol() view returns (string)',
-  'function balanceOf(address) view returns (uint256)',
-]
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+  "function balanceOf(address) view returns (uint256)",
+];
 
-export default function App() {
+export default function EvmMultiWalletTracker() {
+  // ----- Theme (Dark/Light) -----
+  const prefersDark = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const [dark, setDark] = useState(() => {
+    try {
+      const saved = localStorage.getItem("evm_tracker_theme");
+      return saved ? saved === "dark" : prefersDark;
+    } catch {
+      return prefersDark;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("evm_tracker_theme", dark ? "dark" : "light"); } catch {}
+  }, [dark]);
+
+  const theme = useMemo(() => {
+    return dark
+      ? {
+          bg: "#0b1220",
+          text: "#e5e7eb",
+          subtext: "#9ca3af",
+          panel: "#111827",
+          border: "#1f2937",
+          input: "#0f172a",
+          ring: "#334155",
+          accent: "#3b82f6",
+          accentText: "#ffffff",
+          success: "#22c55e",
+          danger: "#ef4444",
+          tableHeader: "#0f1627",
+          shadow: "0 8px 24px rgba(0,0,0,0.35)",
+        }
+      : {
+          bg: "#f7f7fb",
+          text: "#0f172a",
+          subtext: "#475569",
+          panel: "#ffffff",
+          border: "#e5e7eb",
+          input: "#ffffff",
+          ring: "#cbd5e1",
+          accent: "#2563eb",
+          accentText: "#ffffff",
+          success: "#16a34a",
+          danger: "#dc2626",
+          tableHeader: "#f8fafc",
+          shadow: "0 8px 24px rgba(2, 6, 23, 0.08)",
+        };
+  }, [dark]);
+
+  // ----- App State -----
   const [chains, setChains] = useState([
-    { id: 'ethereum', rpc: 'https://ethereum-rpc.publicnode.com', symbol: 'ETH' },
-    { id: 'polygon', rpc: 'https://polygon-mainnet.public.blastapi.io', symbol: 'MATIC' },
-    { id: 'base', rpc: 'https://base-mainnet.public.blastapi.io', symbol: 'ETH' },
-  ])
-  const [wallets, setWallets] = useState(['0x0000000000000000000000000000000000000000'])
-  const [tokens, setTokens] = useState({})
-  const [intervalSec, setIntervalSec] = useState(0)
-  const [running, setRunning] = useState(false)
-  const [lastUpdated, setLastUpdated] = useState(null)
-  const [rows, setRows] = useState([])
-  const timerRef = useRef(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
+    { id: "ethereum", rpc: "https://ethereum-rpc.publicnode.com", symbol: "ETH" },
+    { id: "polygon", rpc: "https://polygon-bor-rpc.publicnode.com", symbol: "MATIC" },
+  ]);
+  const [wallets, setWallets] = useState(["0x0000000000000000000000000000000000000000"]);
+  const [tokens, setTokens] = useState({}); // { chainId: [{address, symbol, decimals}] }
+  const [intervalSec, setIntervalSec] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const timerRef = useRef(null);
 
-  function addChain() { setChains(c => [...c, { id: `chain-${Date.now()}`, rpc: '', symbol: '' }]) }
-  function updateChain(i, patch) { setChains(c => c.map((ch, idx) => idx === i ? { ...ch, ...patch } : ch)) }
-  function removeChain(i) { setChains(c => c.filter((_, idx) => idx !== i)) }
+  // ----- Utils -----
+  const card = (extra = {}) => ({
+    background: theme.panel,
+    border: `1px solid ${theme.border}`,
+    borderRadius: 16,
+    padding: 16,
+    boxShadow: theme.shadow,
+    ...extra,
+  });
+  const btn = (bg, color = theme.accentText) => ({
+    padding: "8px 12px",
+    borderRadius: 10,
+    border: `1px solid ${theme.border}`,
+    background: bg,
+    color,
+    cursor: "pointer",
+    fontWeight: 600,
+  });
+  const input = {
+    padding: 10,
+    borderRadius: 10,
+    border: `1px solid ${theme.ring}`,
+    background: theme.input,
+    color: theme.text,
+    outline: "none",
+  };
+  const label = { fontSize: 12, color: theme.subtext };
 
-  function addWallet() { setWallets(w => [...w, '']) }
-  function updateWallet(i, v) { setWallets(w => w.map((x, idx) => i === idx ? v : x)) }
-  function removeWallet(i) { setWallets(w => w.filter((_, idx) => idx !== i)) }
+  const fmt = (v, digits = 4) => {
+    if (v === null || v === undefined || Number.isNaN(v)) return "-";
+    const n = typeof v === "number" ? v : Number(v);
+    return n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  };
 
-  function addToken(chainId) { setTokens(t => ({ ...t, [chainId]: [...(t[chainId] || []), { address: '', symbol: '', decimals: null }] })) }
+  // ----- Mutators -----
+  function addChain() { setChains((c) => [...c, { id: `chain-${Date.now()}`, rpc: "", symbol: "" }]); }
+  function updateChain(idx, patch) { setChains((c) => c.map((ch, i) => (i === idx ? { ...ch, ...patch } : ch))); }
+  function removeChain(idx) { setChains((c) => c.filter((_, i) => i !== idx)); }
+
+  function addWallet() { setWallets((w) => [...w, ""]); }
+  function updateWallet(i, v) { setWallets((w) => w.map((x, idx) => (i === idx ? v : x))); }
+  function removeWallet(i) { setWallets((w) => w.filter((_, idx) => idx !== i)); }
+
+  function addToken(chainId) { setTokens((t) => ({ ...t, [chainId]: [...(t[chainId] || []), { address: "", symbol: "", decimals: null }] })); }
   function updateToken(chainId, idx, patch) {
-    setTokens(t => ({ ...t, [chainId]: (t[chainId] || []).map((tk, i) => i === idx ? { ...tk, ...patch } : tk) }))
+    setTokens((t) => ({ ...t, [chainId]: (t[chainId] || []).map((tk, i) => (i === idx ? { ...tk, ...patch } : tk)) }));
   }
-  function removeToken(chainId, idx) { setTokens(t => ({ ...t, [chainId]: (t[chainId] || []).filter((_, i) => i !== idx) })) }
+  function removeToken(chainId, idx) { setTokens((t) => ({ ...t, [chainId]: (t[chainId] || []).filter((_, i) => i !== idx) })); }
 
+  // ----- Core: fetch balances -----
   async function fetchBalancesOnce() {
-    setError(null); setLoading(true)
-    const out = []
+    setError(null);
+    setLoading(true);
+    const out = [];
     try {
       for (const ch of chains) {
-        if (!ch.rpc || !ch.id) continue
-        let provider
+        if (!ch.rpc || !ch.id) continue;
+        let provider;
         try {
-          provider = new ethers.JsonRpcProvider(ch.rpc)
-          await provider.getBlockNumber()
+          provider = new ethers.JsonRpcProvider(ch.rpc);
+          await provider.getBlockNumber();
         } catch (e) {
-          out.push({ chain: ch.id, error: `RPC connect error: ${e.message}` })
-          continue
+          out.push({ chain: ch.id, error: `RPC connect error: ${e.message}` });
+          continue;
         }
         for (const w of wallets) {
-          if (!w) continue
-          let checksum
+          if (!w) continue;
+          let checksum;
+          try { checksum = ethers.getAddress(w); }
+          catch { out.push({ chain: ch.id, wallet: w, asset: ch.symbol || "native", contract: "native", balance: null, error: "invalid address" }); continue; }
+
           try {
-            checksum = ethers.getAddress(w)
-          } catch {
-            out.push({ chain: ch.id, wallet: w, asset: ch.symbol || 'native', contract: 'native', balance: null, error: 'invalid address' })
-            continue
-          }
-          try {
-            const nativeBal = await provider.getBalance(checksum)
-            out.push({ chain: ch.id, wallet: checksum, asset: ch.symbol || 'native', contract: 'native', balance: Number(ethers.formatEther(nativeBal)) })
+            const nativeBal = await provider.getBalance(checksum);
+            out.push({ chain: ch.id, wallet: checksum, asset: ch.symbol || "native", contract: "native", balance: Number(ethers.formatEther(nativeBal)) });
           } catch (e) {
-            out.push({ chain: ch.id, wallet: checksum, asset: ch.symbol || 'native', contract: 'native', balance: null, error: `native error: ${e.message}` })
+            out.push({ chain: ch.id, wallet: checksum, asset: ch.symbol || "native", contract: "native", balance: null, error: `native error: ${e.message}` });
           }
-          const tlist = tokens[ch.id] || []
+
+          const tlist = tokens[ch.id] || [];
           for (const t of tlist) {
-            if (!t.address) continue
+            if (!t.address) continue;
             try {
-              const c = new ethers.Contract(t.address, ERC20_ABI, provider)
-              let decimals = t.decimals
+              const c = new ethers.Contract(t.address, ERC20_ABI, provider);
+              let decimals = t.decimals;
               if (decimals === undefined || decimals === null) {
-                try { decimals = await c.decimals() } catch { decimals = 18 }
+                try { decimals = await c.decimals(); } catch { decimals = 18; }
               }
-              let symbol = t.symbol || ''
+              let symbol = t.symbol || "";
               if (!symbol) {
-                try { symbol = await c.symbol() } catch { symbol = t.address.slice(0, 6) }
+                try { symbol = await c.symbol(); } catch { symbol = t.address.slice(0, 6); }
               }
-              const raw = await c.balanceOf(checksum)
-              const val = Number(ethers.formatUnits(raw, decimals))
-              out.push({ chain: ch.id, wallet: checksum, asset: symbol, contract: t.address, balance: val, decimals })
+              const raw = await c.balanceOf(checksum);
+              const val = Number(ethers.formatUnits(raw, decimals));
+              out.push({ chain: ch.id, wallet: checksum, asset: symbol, contract: t.address, balance: val, decimals });
             } catch (e) {
-              out.push({ chain: ch.id, wallet: checksum, asset: t.symbol || t.address.slice(0, 6), contract: t.address, balance: null, error: `token error: ${e.message}` })
+              out.push({ chain: ch.id, wallet: checksum, asset: t.symbol || t.address.slice(0, 6), contract: t.address, balance: null, error: `token error: ${e.message}` });
             }
           }
         }
       }
-      setRows(out)
-      setLastUpdated(new Date().toISOString())
+      setRows(out);
+      setLastUpdated(new Date().toISOString());
     } catch (e) {
-      setError(e.message || String(e))
+      setError(e.message || String(e));
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   }
 
+  // Start/stop tracking loop
   useEffect(() => {
     if (running) {
-      fetchBalancesOnce()
-      if (intervalSec > 0) {
-        timerRef.current = setInterval(fetchBalancesOnce, intervalSec * 1000)
-      }
+      fetchBalancesOnce();
+      if (intervalSec > 0) timerRef.current = setInterval(fetchBalancesOnce, intervalSec * 1000);
     }
-    return () => { if (timerRef.current) clearInterval(timerRef.current); timerRef.current = null }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); timerRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, intervalSec])
+  }, [running, intervalSec]);
 
+  // Export CSV with 4-decimals
   function exportCsv() {
-    const header = ['chain','wallet','asset','contract','decimals','balance','error'].join(',') + '\n'
-    const lines = rows.map(r => [r.chain, r.wallet, r.asset, r.contract, (r.decimals ?? ''), (r.balance ?? ''), (r.error ?? '')]
-      .map(v => '"' + String(v).replace(/"/g,'""') + '"').join(',')).join('\n')
-    const blob = new Blob([header + lines], { type: 'text/csv;charset=utf-8;' })
-    saveAs(blob, `evm_balances_${new Date().toISOString()}.csv`)
+    const fix4 = (x) => (x == null ? "" : Number(x).toFixed(4));
+    const header = ["chain", "wallet", "asset", "contract", "decimals", "balance", "error"].join(",") + "
+";
+    const lines = rows
+      .map((r) => [r.chain, r.wallet, r.asset, r.contract, r.decimals ?? "", fix4(r.balance), r.error ?? ""]
+        .map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
+      .join("
+");
+    const blob = new Blob([header + lines], { type: "text/csv;charset=utf-8;" });
+    saveAs(blob, `evm_balances_${new Date().toISOString()}.csv`);
   }
 
+  // ----- Render -----
   return (
-    <div style={{fontFamily:'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', padding:16, maxWidth:1100, margin:'0 auto'}}>
-      <h1 style={{fontSize:24, fontWeight:700, marginBottom:12}}>EVM Multi Wallet Tracker (GitHub Pages)</h1>
+    <div style={{ background: theme.bg, color: theme.text, minHeight: "100vh" }}>
+      {/* Header */}
+      <div style={{
+        padding: 20,
+        background: dark
+          ? "radial-gradient(1200px 400px at 10% -10%, rgba(59,130,246,0.20), transparent), radial-gradient(900px 300px at 100% 0%, rgba(34,197,94,0.18), transparent)"
+          : "radial-gradient(1200px 400px at 10% -10%, rgba(59,130,246,0.12), transparent), radial-gradient(900px 300px at 100% 0%, rgba(34,197,94,0.12), transparent)",
+        borderBottom: `1px solid ${theme.border}`,
+      }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <h1 style={{ fontSize: 26, fontWeight: 800, margin: 0 }}>EVM Multi Wallet Tracker</h1>
+            <div style={{ fontSize: 13, color: theme.subtext, marginTop: 4 }}>Native + ERC‑20 balances • CSV export • Auto refresh</div>
+          </div>
+          <button onClick={() => setDark((d) => !d)} style={btn(theme.panel, theme.text)}>
+            {dark ? "🌙 Dark" : "☀️ Light"}
+          </button>
+        </div>
+      </div>
 
-      <section style={{background:'#fff', border:'1px solid #eee', borderRadius:12, padding:16, marginBottom:16}}>
-        <h2 style={{fontWeight:600, marginBottom:8}}>Chains</h2>
-        {chains.map((ch, i) => (
-          <div key={i} style={{display:'grid', gridTemplateColumns:'1fr 2fr 0.7fr auto', gap:8, alignItems:'center', marginBottom:8}}>
-            <input placeholder="id (eg. ethereum)" value={ch.id} onChange={e=>updateChain(i,{id:e.target.value})} style={{padding:8, border:'1px solid #ddd', borderRadius:8}} />
-            <input placeholder="RPC URL" value={ch.rpc} onChange={e=>updateChain(i,{rpc:e.target.value})} style={{padding:8, border:'1px solid #ddd', borderRadius:8}} />
-            <input placeholder="symbol" value={ch.symbol} onChange={e=>updateChain(i,{symbol:e.target.value})} style={{padding:8, border:'1px solid #ddd', borderRadius:8}} />
-            <button onClick={()=>removeChain(i)} style={{color:'#b91c1c'}}>Del</button>
-            <div style={{gridColumn:'1 / -1'}}>
-              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
-                <div style={{fontSize:14, fontWeight:500}}>Tokens for {ch.id}</div>
-                <button onClick={()=>addToken(ch.id)} style={{color:'#2563eb'}}>+ token</button>
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: 20 }}>
+        {/* Chains */}
+        <section style={card({ marginBottom: 16 })}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <h2 style={{ margin: 0, fontSize: 16 }}>Chains</h2>
+            <button onClick={addChain} style={btn(dark ? "#0b1220" : "#f3f4f6", theme.text)}>+ add chain</button>
+          </div>
+
+          {chains.map((ch, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 2fr 0.8fr auto", gap: 8, alignItems: "center", marginBottom: 10 }}>
+              <div>
+                <div style={label}>Chain ID</div>
+                <input style={input} placeholder="id (e.g. ethereum)" value={ch.id} onChange={(e) => updateChain(i, { id: e.target.value })} />
               </div>
-              {(tokens[ch.id] || []).map((tk, j) => (
-                <div key={j} style={{display:'flex', gap:8, marginTop:8}}>
-                  <input placeholder="token address" value={tk.address} onChange={e=>updateToken(ch.id, j, {address:e.target.value})} style={{flex:1, padding:8, border:'1px solid #ddd', borderRadius:8}} />
-                  <input placeholder="symbol" value={tk.symbol} onChange={e=>updateToken(ch.id, j, {symbol:e.target.value})} style={{width:100, padding:8, border:'1px solid #ddd', borderRadius:8}} />
-                  <input placeholder="dec" value={tk.decimals ?? ''} onChange={e=>updateToken(ch.id, j, {decimals: e.target.value ? Number(e.target.value) : null})} style={{width:80, padding:8, border:'1px solid #ddd', borderRadius:8}} />
-                  <button onClick={()=>removeToken(ch.id, j)} style={{color:'#b91c1c'}}>x</button>
+              <div>
+                <div style={label}>RPC URL</div>
+                <input style={input} placeholder="https://..." value={ch.rpc} onChange={(e) => updateChain(i, { rpc: e.target.value })} />
+              </div>
+              <div>
+                <div style={label}>Symbol</div>
+                <input style={input} placeholder="ETH" value={ch.symbol} onChange={(e) => updateChain(i, { symbol: e.target.value })} />
+              </div>
+              <div>
+                <button onClick={() => removeChain(i)} style={{ ...btn(theme.panel, theme.danger), borderColor: theme.danger }}>Del</button>
+              </div>
+
+              {/* Tokens per chain */}
+              <div style={{ gridColumn: "1 / -1", marginTop: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>Tokens for {ch.id}</div>
+                  <button onClick={() => addToken(ch.id)} style={btn("transparent", theme.accent)} className="underline">+ token</button>
                 </div>
-              ))}
+                {(tokens[ch.id] || []).map((tk, j) => (
+                  <div key={j} style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <input style={{ ...input, flex: 1 }} placeholder="token address" value={tk.address} onChange={(e) => updateToken(ch.id, j, { address: e.target.value })} />
+                    <input style={{ ...input, width: 120 }} placeholder="symbol" value={tk.symbol} onChange={(e) => updateToken(ch.id, j, { symbol: e.target.value })} />
+                    <input style={{ ...input, width: 90 }} placeholder="dec" value={tk.decimals ?? ""} onChange={(e) => updateToken(ch.id, j, { decimals: e.target.value ? Number(e.target.value) : null })} />
+                    <button onClick={() => removeToken(ch.id, j)} style={{ ...btn(theme.panel, theme.danger), borderColor: theme.danger }}>x</button>
+                  </div>
+                ))}
+              </div>
             </div>
+          ))}
+        </section>
+
+        {/* Wallets */}
+        <section style={card({ marginBottom: 16 })}>
+          <h2 style={{ margin: 0, fontSize: 16, marginBottom: 8 }}>Wallets</h2>
+          {wallets.map((w, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <input style={{ ...input, flex: 1 }} value={w} onChange={(e) => updateWallet(i, e.target.value)} placeholder="0x..." />
+              <button onClick={() => removeWallet(i)} style={{ ...btn(theme.panel, theme.danger), borderColor: theme.danger }}>Del</button>
+            </div>
+          ))}
+          <button onClick={addWallet} style={btn(dark ? "#0b1220" : "#f3f4f6", theme.text)}>+ add wallet</button>
+        </section>
+
+        {/* Controls */}
+        <section style={card({ marginBottom: 16 })}>
+          <h2 style={{ margin: 0, fontSize: 16, marginBottom: 12 }}>Controls</h2>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={label}>Refresh interval (sec)</span>
+              <input style={{ ...input, width: 100 }} value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value) || 0)} />
+            </label>
+            <button onClick={() => setRunning((r) => !r)} style={btn(running ? theme.danger : theme.success)}>
+              {running ? "Stop" : "Start"}
+            </button>
+            <button onClick={fetchBalancesOnce} disabled={loading} style={btn(theme.accent)}>
+              Refresh now
+            </button>
+            <button onClick={exportCsv} disabled={!rows.length} style={btn(dark ? "#0b1220" : "#111827", "#ffffff")}>
+              Export CSV
+            </button>
+            <div style={{ marginLeft: "auto", fontSize: 12, color: theme.subtext }}>Last: {lastUpdated ?? "-"}</div>
           </div>
-        ))}
-        <button onClick={addChain} style={{padding:'6px 10px', background:'#f3f4f6', borderRadius:8}}>+ add chain</button>
-      </section>
+          {error && <div style={{ marginTop: 8, color: theme.danger }}>Error: {error}</div>}
+        </section>
 
-      <section style={{background:'#fff', border:'1px solid #eee', borderRadius:12, padding:16, marginBottom:16}}>
-        <h2 style={{fontWeight:600, marginBottom:8}}>Wallets</h2>
-        {wallets.map((w,i)=>(
-          <div key={i} style={{display:'flex', gap:8, marginBottom:8}}>
-            <input value={w} onChange={e=>updateWallet(i, e.target.value)} placeholder="0x..." style={{flex:1, padding:8, border:'1px solid #ddd', borderRadius:8}} />
-            <button onClick={()=>removeWallet(i)} style={{color:'#b91c1c'}}>Del</button>
+        {/* Balances */}
+        <section style={card()}>
+          <h2 style={{ margin: 0, fontSize: 16, marginBottom: 8 }}>Balances</h2>
+          <div style={{ overflow: "auto", maxHeight: 440, border: `1px solid ${theme.border}`, borderRadius: 12 }}>
+            <table style={{ width: "100%", fontSize: 14, borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: theme.tableHeader }}>
+                  {[
+                    "Chain",
+                    "Wallet",
+                    "Asset",
+                    "Contract",
+                    "Decimals",
+                    "Balance",
+                    "Error",
+                  ].map((h) => (
+                    <th key={h} style={{ textAlign: "left", padding: "10px 12px", position: "sticky", top: 0 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} style={{ borderTop: `1px solid ${theme.border}` }}>
+                    <td style={{ padding: "10px 12px" }}>{r.chain}</td>
+                    <td style={{ padding: "10px 12px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12 }}>{r.wallet}</td>
+                    <td style={{ padding: "10px 12px" }}>{r.asset}</td>
+                    <td style={{ padding: "10px 12px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12 }}>{r.contract}</td>
+                    <td style={{ padding: "10px 12px" }}>{r.decimals ?? ""}</td>
+                    <td style={{ padding: "10px 12px" }}>{fmt(r.balance, 4)}</td>
+                    <td style={{ padding: "10px 12px", color: theme.danger }}>{r.error ?? ""}</td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={7} style={{ padding: "14px 12px", textAlign: "center", color: theme.subtext }}>
+                      No results yet — click "Refresh now" or Start tracking.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
-        ))}
-        <button onClick={addWallet} style={{padding:'6px 10px', background:'#f3f4f6', borderRadius:8}}>+ add wallet</button>
-      </section>
+        </section>
 
-      <section style={{background:'#fff', border:'1px solid #eee', borderRadius:12, padding:16, marginBottom:16}}>
-        <h2 style={{fontWeight:600, marginBottom:8}}>Controls</h2>
-        <div style={{display:'flex', gap:12, alignItems:'center', flexWrap:'wrap'}}>
-          <label>Refresh interval (sec)
-            <input value={intervalSec} onChange={e=>setIntervalSec(Number(e.target.value)||0)} style={{width:80, marginLeft:8, padding:6, border:'1px solid #ddd', borderRadius:8}} />
-          </label>
-          <button onClick={()=>setRunning(r=>!r)} style={{padding:'6px 12px', borderRadius:8, background: running ? '#ef4444' : '#22c55e', color:'#fff'}}>{running ? 'Stop' : 'Start'}</button>
-          <button onClick={fetchBalancesOnce} disabled={loading} style={{padding:'6px 12px', borderRadius:8, background:'#2563eb', color:'#fff'}}>Refresh now</button>
-          <button onClick={exportCsv} disabled={!rows.length} style={{padding:'6px 12px', borderRadius:8, background:'#111827', color:'#fff'}}>Export CSV</button>
-          <div style={{marginLeft:'auto', fontSize:12, color:'#6b7280'}}>Last: {lastUpdated ?? '-'}</div>
-        </div>
-        {error && <div style={{marginTop:8, color:'#b91c1c'}}>Error: {error}</div>}
-      </section>
-
-      <section style={{background:'#fff', border:'1px solid #eee', borderRadius:12, padding:16}}>
-        <h2 style={{fontWeight:600, marginBottom:8}}>Balances</h2>
-        <div style={{overflow:'auto', maxHeight:420}}>
-          <table style={{width:'100%', fontSize:14, borderCollapse:'collapse'}}>
-            <thead>
-              <tr style={{background:'#f9fafb', textAlign:'left'}}>
-                <th style={{padding:'6px 8px'}}>Chain</th>
-                <th style={{padding:'6px 8px'}}>Wallet</th>
-                <th style={{padding:'6px 8px'}}>Asset</th>
-                <th style={{padding:'6px 8px'}}>Contract</th>
-                <th style={{padding:'6px 8px'}}>Decimals</th>
-                <th style={{padding:'6px 8px'}}>Balance</th>
-                <th style={{padding:'6px 8px'}}>Error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r,i)=>(
-                <tr key={i} style={{borderTop:'1px solid #eee'}}>
-                  <td style={{padding:'6px 8px'}}>{r.chain}</td>
-                  <td style={{padding:'6px 8px', fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize:12}}>{r.wallet}</td>
-                  <td style={{padding:'6px 8px'}}>{r.asset}</td>
-                  <td style={{padding:'6px 8px', fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize:12}}>{r.contract}</td>
-                  <td style={{padding:'6px 8px'}}>{r.decimals ?? ''}</td>
-                  <td style={{padding:'6px 8px'}}>{fmt(r.balance)}</td>
-                  <td style={{padding:'6px 8px', color:'#b91c1c'}}>{r.error ?? ''}</td>
-                </tr>
-              ))}
-              {rows.length === 0 && (
-                <tr>
-                  <td colSpan={7} style={{padding:'16px 8px', textAlign:'center'}}>No results yet — click "Refresh now" or Start tracking.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <p style={{marginTop:16, fontSize:12, color:'#6b7280'}}>Tip: Some RPCs block browser CORS. Use public CORS-enabled RPCs or a small proxy.</p>
+        <div style={{ color: theme.subtext, fontSize: 12, marginTop: 12 }}>Tip: Some RPCs block browser CORS. Use public CORS-enabled RPCs or a small proxy.</div>
+      </div>
     </div>
-  )
+  );
 }
