@@ -18,8 +18,9 @@ const ERC20_ABI = [
 
 export default function App() {
   const [chains, setChains] = useState([
-    { id: 'ethereum', rpc: 'https://rpc.ankr.com/eth', symbol: 'ETH' },
-    { id: 'polygon', rpc: 'https://rpc.ankr.com/polygon', symbol: 'MATIC' },
+    { id: 'ethereum', rpc: 'https://ethereum-rpc.publicnode.com', symbol: 'ETH' },
+    { id: 'polygon', rpc: 'https://polygon-mainnet.public.blastapi.io', symbol: 'MATIC' },
+    { id: 'base', rpc: 'https://base-mainnet.public.blastapi.io', symbol: 'ETH' },
   ])
   const [wallets, setWallets] = useState(['0x0000000000000000000000000000000000000000'])
   const [tokens, setTokens] = useState({})
