@@ -2,6 +2,14 @@ import React, { useEffect, useState, useRef } from 'react'
 import { ethers } from 'ethers'
 import { saveAs } from 'file-saver'
 
+// number formatting helper: fixed 4 decimals, no scientific notation
+const fmt = (v) => {
+  if (v === null || v === undefined || Number.isNaN(v)) return "-";
+  const n = typeof v === "number" ? v : Number(v);
+  return n.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+};
+
+
 const ERC20_ABI = [
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
@@ -195,7 +203,7 @@ export default function App() {
                   <td style={{padding:'6px 8px'}}>{r.asset}</td>
                   <td style={{padding:'6px 8px', fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize:12}}>{r.contract}</td>
                   <td style={{padding:'6px 8px'}}>{r.decimals ?? ''}</td>
-                  <td style={{padding:'6px 8px'}}>{r.balance == null ? '-' : r.balance}</td>
+                  <td style={{padding:'6px 8px'}}>{fmt(r.balance)}</td>
                   <td style={{padding:'6px 8px', color:'#b91c1c'}}>{r.error ?? ''}</td>
                 </tr>
               ))}
