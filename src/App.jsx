@@ -4,9 +4,10 @@ import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
 
 /*
-EVM Multi Wallet Tracker — Dark UI + CSV/XLSX Export
+EVM Multi Wallet Tracker — Dark UI + CSV/XLSX Export & Import
 - Fixed 4 decimals (tidak ada scientific notation)
 - RPC publik (Chainlist)
+- IMPORT wallet address dari CSV/XLSX (otomatis deteksi kolom)
 */
 
 const ERC20_ABI = [
@@ -88,6 +89,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const timerRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // ----- UI helpers -----
   const card = (extra = {}) => ({
@@ -165,6 +167,71 @@ export default function App() {
       ...t,
       [chainId]: (t[chainId] || []).filter((_, i) => i !== idx),
     }));
+  }
+
+  // ----- Import Wallets from CSV/XLSX -----
+  async function handleImportClick() {
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    fileInputRef.current?.click();
+  }
+
+  function isProbablyAddress(v) {
+    if (!v || typeof v !== "string") return false;
+    const s = v.trim();
+    if (!s.startsWith("0x") || s.length !== 42) return false;
+    return true;
+  }
+
+  function extractAddressesFromSheet(sheet) {
+    // Try reading as 2D array first
+    const rowsA = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+    const found = new Set();
+    for (const row of rowsA) {
+      for (const cell of row) {
+        const s = String(cell).trim();
+        if (isProbablyAddress(s) && ethers.isAddress(s)) {
+          found.add(ethers.getAddress(s));
+        }
+      }
+    }
+    // Also try object mode to capture named columns like "wallet", "address"
+    const rowsO = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    for (const obj of rowsO) {
+      for (const key of Object.keys(obj)) {
+        const s = String(obj[key]).trim();
+        if (isProbablyAddress(s) && ethers.isAddress(s)) {
+          found.add(ethers.getAddress(s));
+        }
+      }
+    }
+    return Array.from(found);
+  }
+
+  async function handleFileSelected(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" }); // works for .xlsx, .xls, and .csv
+      const firstSheetName = wb.SheetNames[0];
+      const sheet = wb.Sheets[firstSheetName];
+      const addrs = extractAddressesFromSheet(sheet);
+      if (!addrs.length) {
+        alert("Tidak ditemukan address valid di file. Pastikan format 0x... (42 chars).");
+        return;
+      }
+      setWallets((prev) => {
+        const have = new Set(prev.map((w) => {
+          try { return ethers.getAddress(w); } catch { return w; }
+        }));
+        const merged = [...prev];
+        for (const a of addrs) if (!have.has(a)) merged.push(a);
+        return merged;
+      });
+    } catch (err) {
+      console.error(err);
+      alert(`Gagal import: ${err?.message || String(err)}`);
+    }
   }
 
   // ----- Core: fetch balances -----
@@ -345,6 +412,21 @@ export default function App() {
     XLSX.writeFile(wb, fname);
   }
 
+  // (Optional) Export Template for Wallet Import
+  function exportWalletTemplateCSV() {
+    const header = "wallet\n";
+    const csv = header + wallets.join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    saveAs(blob, "wallet_template.csv");
+  }
+  function exportWalletTemplateXLSX() {
+    const data = wallets.map((w) => ({ wallet: w }));
+    const ws = XLSX.utils.json_to_sheet(data, { header: ["wallet"] });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "wallets");
+    XLSX.writeFile(wb, "wallet_template.xlsx");
+  }
+
   // ----- Render -----
   return (
     <div style={{ background: theme.bg, color: theme.text, minHeight: "100vh" }}>
@@ -372,7 +454,7 @@ export default function App() {
               EVM Multi Wallet Tracker
             </h1>
             <div style={{ fontSize: 13, color: theme.subtext, marginTop: 4 }}>
-              Native + ERC-20 balances • CSV / Excel export • Auto refresh
+              Native + ERC-20 balances • CSV / Excel export • Auto refresh • Wallet import
             </div>
           </div>
           <button onClick={() => setDark((d) => !d)} style={btn(theme.panel, theme.text)}>
@@ -503,9 +585,30 @@ export default function App() {
 
         {/* Wallets */}
         <section style={card({ marginBottom: 16 })}>
-          <h2 style={{ margin: 0, fontSize: 16, marginBottom: 8 }}>Wallets</h2>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <h2 style={{ margin: 0, fontSize: 16, marginBottom: 8 }}>Wallets</h2>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                onChange={handleFileSelected}
+                style={{ display: "none" }}
+              />
+              <button onClick={handleImportClick} style={btn(dark ? "#0b1220" : "#0b5fff", "#ffffff")}>
+                Import CSV/XLSX
+              </button>
+              <button onClick={exportWalletTemplateCSV} style={btn(dark ? "#0b1220" : "#111827", "#ffffff")}>
+                Export Wallet CSV
+              </button>
+              <button onClick={exportWalletTemplateXLSX} style={btn(dark ? "#0b1220" : "#2563eb", "#ffffff")}>
+                Export Wallet XLSX
+              </button>
+            </div>
+          </div>
+
           {wallets.map((w, i) => (
-            <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <div key={i} style={{ display: "flex", gap: 8, margin: "8px 0" }}>
               <input
                 style={{ ...inputStyle, flex: 1 }}
                 value={w}
@@ -520,9 +623,12 @@ export default function App() {
               </button>
             </div>
           ))}
-          <button onClick={addWallet} style={btn(dark ? "#0b1220" : "#f3f4f6", theme.text)}>
+          <button onClick={addWallet} style={{ ...btn(dark ? "#0b1220" : "#f3f4f6", theme.text), marginTop: 8 }}>
             + add wallet
           </button>
+          <div style={{ fontSize: 12, color: theme.subtext, marginTop: 8 }}>
+            Tips: File bisa berisi kolom <code>wallet</code>/<code>address</code> atau 1 kolom berisi address.
+          </div>
         </section>
 
         {/* Controls */}
